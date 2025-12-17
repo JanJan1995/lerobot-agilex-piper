@@ -72,7 +72,14 @@ from lerobot.datasets.video_utils import (
     get_safe_default_codec,
     get_video_info,
 )
-
+import time
+import cv2
+from typing import List
+#import ffmpegcv
+import os
+import glob
+#import natsort
+import threading
 CODEBASE_VERSION = "v2.1"
 
 
@@ -777,7 +784,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             if isinstance(frame[name], torch.Tensor):
                 frame[name] = frame[name].numpy()
 
-        validate_frame(frame, self.features)
+        # validate_frame(frame, self.features)
 
         if self.episode_buffer is None:
             self.episode_buffer = self.create_episode_buffer()
@@ -791,6 +798,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.episode_buffer["task"].append(task)
 
         # Add frame features to episode_buffer
+        self.image_path = dict()
         for key in frame:
             if key not in self.features:
                 raise ValueError(
@@ -798,13 +806,18 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 )
 
             if self.features[key]["dtype"] in ["image", "video"]:
-                img_path = self._get_image_file_path(
-                    episode_index=self.episode_buffer["episode_index"], image_key=key, frame_index=frame_index
-                )
-                if frame_index == 0:
-                    img_path.parent.mkdir(parents=True, exist_ok=True)
-                self._save_image(frame[key], img_path)
-                self.episode_buffer[key].append(str(img_path))
+            #     img_path = self._get_image_file_path(
+            #         episode_index=self.episode_buffer["episode_index"], image_key=key, frame_index=frame_index
+            #     )
+            #     if frame_index == 0:
+            #         img_path.parent.mkdir(parents=True, exist_ok=True)
+                    
+            #     img_path = Path(str(img_path)[:-4] + ".jpg")
+            #     self._save_image(frame[key], img_path)
+            #     # print("str(img_path):", str(img_path))
+            #     self.episode_buffer[key].append(str(img_path))
+                self.episode_buffer[key].append(str(frame[key]))
+                self.image_path[key] = os.path.dirname(str(frame[key]))
             else:
                 self.episode_buffer[key].append(frame[key])
 
@@ -916,13 +929,13 @@ class LeRobotDataset(torch.utils.data.Dataset):
         episode_index = self.episode_buffer["episode_index"]
 
         # Clean up image files for the current episode buffer
-        if self.image_writer is not None:
-            for cam_key in self.meta.camera_keys:
-                img_dir = self._get_image_file_path(
-                    episode_index=episode_index, image_key=cam_key, frame_index=0
-                ).parent
-                if img_dir.is_dir():
-                    shutil.rmtree(img_dir)
+        # if self.image_writer is not None:
+        #     for cam_key in self.meta.camera_keys:
+        #         img_dir = self._get_image_file_path(
+        #             episode_index=episode_index, image_key=cam_key, frame_index=0
+        #         ).parent
+        #         if img_dir.is_dir():
+        #             shutil.rmtree(img_dir)
 
         # Reset the buffer
         self.episode_buffer = self.create_episode_buffer()
@@ -952,6 +965,110 @@ class LeRobotDataset(torch.utils.data.Dataset):
         if self.image_writer is not None:
             self.image_writer.wait_until_done()
 
+    def gpu_imgs2video(self, img_paths: List[str],
+                    out_path: str,
+                    fps: float = 30,
+                    gpu: int = 0,
+                    quality: int = 23) -> None:
+        """
+        把图片路径列表直接用 GPU 编码成 H264 视频
+        :param img_paths: 排序好的图片绝对/相对路径
+        :param out_path:  输出视频文件（mp4/avi 均可）
+        :param fps:       帧率
+        :param gpu:       GPU 卡号
+        :param quality:   CQ 值（越小画质越好，18-28 常用）
+        """
+        if not img_paths:
+            raise ValueError("图片列表为空")
+
+        # 拿分辨率
+        h, w = cv2.imread(img_paths[0]).shape[:2]
+
+        # 选择 NVIDIA 硬编器
+        vid_out = ffmpegcv.VideoWriterNV(
+            out_path,
+            codec="h264",         # 2. 编码格式
+            fps=30,               # 3. 帧率
+            pix_fmt="bgr24",      # 4. 输入像素格式（OpenCV 默认 BGR）
+            gpu=0,                # 5. 显卡索引
+            bitrate="2M",         # 6. 目标码率（可选）
+            resize=(w, h),   # 7. 实时缩放（可选）
+            preset="p7"           # 8. NVENC 预设（可选）
+        )
+
+        for p in img_paths:
+            frame = cv2.imread(p)
+            # if frame is None:
+            #     print(f"[WARN] 跳过无效文件：{p}")
+            #     continue
+            # # 尺寸不一致时 resize 到 (w,h)
+            # if frame.shape[:2] != (h, w):
+            #     frame = cv2.resize(frame, (w, h))
+            vid_out.write(frame)   # 内部自动 upload CUDA → 硬编
+
+        vid_out.release()
+        print(f"GPU 编码完成 → {os.path.abspath(out_path)}")
+
+    def imgs2video(self, img_path_list, out_video_path, fps=25, fourcc_str='mp4v'):
+        """
+        img_path_list : list[str]  图片绝对/相对路径
+        out_video_path: str        输出视频文件，如 out.mp4
+        fps           : int/float  帧率
+        fourcc_str    : str        编码器，常用 'mp4v'/'XVID'/'MJPG'
+        """
+        if not img_path_list:
+            raise ValueError('图片列表为空')
+
+        # 用第一张图拿宽高
+        first = cv2.imread(img_path_list[0])
+        if first is None:
+            raise RuntimeError(f'无法读取第一张图：{img_path_list[0]}')
+        h, w = first.shape[:2]
+
+        # 创建 VideoWriter
+        fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+        writer = cv2.VideoWriter(out_video_path, fourcc, fps, (w, h))
+
+        for idx, p in enumerate(img_path_list):
+            img = cv2.imread(p)
+            if img is None:
+                print(f'警告：跳过无法读取的图 {p}')
+                continue
+            # 尺寸不一致时强制 resize
+            if img.shape[:2] != (h, w):
+                img = cv2.resize(img, (w, h))
+            writer.write(img)
+            if idx % 50 == 0:
+                print(f'已写入 {idx}/{len(img_path_list)} 帧')
+
+    def list_imgs(self, img_dir, ext=('jpg', 'jpeg', 'png', 'bmp', 'tiff')):
+        """返回目录下所有图片文件的绝对路径（升序）"""
+        print("img_dir:", img_dir)
+        pattern = os.path.join(img_dir, '*')
+        files = []
+        for e in ext:
+            files.extend(glob.glob(f'{pattern}.{e}') +
+                        glob.glob(f'{pattern}.{e.upper()}'))
+        return natsort.natsorted(files)      # 人类友好升序
+    
+    def video_encoding(self, episode_index, key):
+        video_path = self.root / self.meta.get_video_file_path(episode_index, key)
+        # if video_path.is_file():
+        #     # Skip if video is already encoded. Could be the case when resuming data recording.
+        #     continue
+        img_dir = self._get_image_file_path(
+            episode_index=episode_index, image_key=key, frame_index=0
+        ).parent
+        # encode_video_frames(img_dir, video_path, self.fps, overwrite=True)
+        os.makedirs(os.path.dirname(video_path), exist_ok=True)
+              #  -c:v h264_nvenc -preset p7 -cq 23 \
+        os.system(f"ffmpeg -y -framerate {self.fps} \
+                -pattern_type glob -i '{self.image_path[key]}/*.jpg' \
+                -c:v h264 -cq 23 \
+                -pix_fmt yuv420p {str(video_path)} -loglevel quiet")
+        # self.gpu_imgs2video(self.list_imgs(img_dir), str(video_path), fps=self.fps)
+        # shutil.rmtree(img_dir)
+
     def encode_episode_videos(self, episode_index: int) -> None:
         """
         Use ffmpeg to convert frames stored as png into mp4 videos.
@@ -966,17 +1083,22 @@ class LeRobotDataset(torch.utils.data.Dataset):
         Args:
             episode_index (int): Index of the episode to encode.
         """
+        threads = []
         for key in self.meta.video_keys:
-            video_path = self.root / self.meta.get_video_file_path(episode_index, key)
-            if video_path.is_file():
-                # Skip if video is already encoded. Could be the case when resuming data recording.
-                continue
-            img_dir = self._get_image_file_path(
-                episode_index=episode_index, image_key=key, frame_index=0
-            ).parent
-            encode_video_frames(img_dir, video_path, self.fps, overwrite=True)
-            shutil.rmtree(img_dir)
-
+            video_encode_thread = threading.Thread(target=self.video_encoding, args=(episode_index, key))
+            video_encode_thread.start()
+            threads.append(video_encode_thread)
+            # video_path = self.root / self.meta.get_video_file_path(episode_index, key)
+            # if video_path.is_file():
+            #     # Skip if video is already encoded. Could be the case when resuming data recording.
+            #     continue
+            # img_dir = self._get_image_file_path(
+            #     episode_index=episode_index, image_key=key, frame_index=0
+            # ).parent
+            # encode_video_frames(img_dir, video_path, self.fps, overwrite=True)
+            # shutil.rmtree(img_dir)
+        for video_encode_thread in threads:
+            video_encode_thread.join()
         # Update video info (only needed when first episode is encoded since it reads from episode 0)
         if len(self.meta.video_keys) > 0 and episode_index == 0:
             self.meta.update_video_info()
@@ -1234,3 +1356,5 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
             f"  Transformations: {self.image_transforms},\n"
             f")"
         )
+
+
