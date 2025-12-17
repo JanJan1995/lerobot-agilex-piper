@@ -1655,7 +1655,7 @@ def get_arguments():
                         default=['left', 'right'],
                         required=False)
     parser.add_argument('--arm_joint_state_topics', action='store', type=str, help='arm_joint_state_topics',
-                        default=['/puppet/joint_left', '/puppet/joint_right'],
+                        default=['/joint_states_single_l', '/joint_states_single_r'],
                         required=False)
     parser.add_argument('--arm_end_pose_names', action='store', type=str, help='arm_end_pose_names',
                         default=[],
@@ -1670,7 +1670,7 @@ def get_arguments():
                         default=[],
                         required=False)
     parser.add_argument('--arm_joint_state_ctrl_topics', action='store', type=str, help='arm_joint_state_ctrl_topics',
-                        default=['/joint_left_states', '/joint_right_states'],
+                        default=['/joint_states_l', '/joint_states_r'],
                         required=False)
     parser.add_argument('--arm_end_pose_ctrl_topics', action='store', type=str, help='arm_end_pose_ctrl_topics',
                         default=[],
