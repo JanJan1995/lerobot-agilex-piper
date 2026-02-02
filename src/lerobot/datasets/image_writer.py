@@ -38,40 +38,134 @@ def safe_stop_image_writer(func):
     return wrapper
 
 
-def image_array_to_pil_image(image_array: np.ndarray, range_check: bool = True) -> PIL.Image.Image:
-    # TODO(aliberts): handle 1 channel and 4 for depth images
+def image_array_to_pil_image(image_array: np.ndarray, range_check: bool = True, is_depth: bool = False) -> PIL.Image.Image:
+    """Convert numpy array to PIL Image, handling 2D (grayscale/depth) and 3D (RGB) arrays.
+    
+    Args:
+        image_array: Input numpy array
+        range_check: Whether to check value ranges
+        is_depth: If True, save as 16-bit PNG without compression (preserves depth values)
+    """
+    original_shape = image_array.shape
+    original_dtype = image_array.dtype
+    
+    # Handle 2D arrays (grayscale/depth images)
+    if image_array.ndim == 2:
+        # For depth images, preserve 16-bit values without compression
+        if is_depth:
+            # Convert to uint16 if needed, preserving original values
+            if image_array.dtype == np.float32 or image_array.dtype == np.float64:
+                # For float depth values, convert to uint16 (0-65535 range)
+                # Assume depth values are in reasonable range (e.g., millimeters)
+                max_val = image_array.max().item()
+                if max_val > 65535.0:
+                    # If values exceed uint16 range, scale down but preserve relative values
+                    image_array = (image_array / (max_val / 65535.0)).astype(np.uint16)
+                elif max_val > 1.0:
+                    # Values are likely in millimeters or similar units
+                    image_array = image_array.astype(np.uint16)
+                else:
+                    # Values in [0, 1] range, scale to uint16
+                    image_array = (image_array * 65535.0).astype(np.uint16)
+            elif image_array.dtype != np.uint16:
+                # Convert other integer types to uint16
+                image_array = image_array.astype(np.uint16)
+            # Use 'I;16' mode for 16-bit grayscale PNG
+            return PIL.Image.fromarray(image_array, mode='I;16')
+        
+        # For regular grayscale images, normalize to uint8
+        if image_array.dtype != np.uint8:
+            if range_check:
+                max_ = image_array.max().item()
+                min_ = image_array.min().item()
+                # For grayscale images, normalize to 0-255 range
+                if max_ > 255.0 or min_ < 0.0:
+                    # Normalize to [0, 1] first if values are outside uint8 range
+                    if max_ > 1.0:
+                        image_array = (image_array - min_) / (max_ - min_ + 1e-8)
+                    image_array = (image_array * 255).astype(np.uint8)
+                else:
+                    image_array = image_array.astype(np.uint8)
+            else:
+                if image_array.dtype == np.float32 or image_array.dtype == np.float64:
+                    # Assume float values are in [0, 1] range
+                    image_array = (image_array * 255).astype(np.uint8)
+                else:
+                    image_array = image_array.astype(np.uint8)
+        return PIL.Image.fromarray(image_array, mode='L')
+    
+    # Handle 3D arrays
     if image_array.ndim != 3:
-        raise ValueError(f"The array has {image_array.ndim} dimensions, but 3 is expected for an image.")
+        raise ValueError(f"The array has {image_array.ndim} dimensions, but 2 or 3 is expected for an image.")
 
-    if image_array.shape[0] == 3:
+    # Handle (C, H, W) format - transpose to (H, W, C)
+    if image_array.shape[0] == 1 or image_array.shape[0] == 3 or image_array.shape[0] == 4:
         # Transpose from pytorch convention (C, H, W) to (H, W, C)
         image_array = image_array.transpose(1, 2, 0)
 
-    elif image_array.shape[-1] != 3:
-        raise NotImplementedError(
-            f"The image has {image_array.shape[-1]} channels, but 3 is required for now."
-        )
+    # Handle single channel 3D arrays (shape becomes (H, W, 1) after transpose)
+    if image_array.shape[-1] == 1:
+        # Squeeze to 2D and use grayscale mode
+        image_array = image_array.squeeze(-1)
+        if image_array.dtype != np.uint8:
+            if range_check:
+                max_ = image_array.max().item()
+                min_ = image_array.min().item()
+                if max_ > 1.0 or min_ < 0.0:
+                    raise ValueError(
+                        "The image data type is float, which requires values in the range [0.0, 1.0]. "
+                        f"However, the provided range is [{min_}, {max_}]. Please adjust the range or "
+                        "provide a uint8 image with values in the range [0, 255]."
+                    )
+            image_array = (image_array * 255).astype(np.uint8)
+        return PIL.Image.fromarray(image_array, mode='L')
+    
+    # Handle RGB images (3 channels)
+    if image_array.shape[-1] == 3:
+        if image_array.dtype != np.uint8:
+            if range_check:
+                max_ = image_array.max().item()
+                min_ = image_array.min().item()
+                if max_ > 1.0 or min_ < 0.0:
+                    raise ValueError(
+                        "The image data type is float, which requires values in the range [0.0, 1.0]. "
+                        f"However, the provided range is [{min_}, {max_}]. Please adjust the range or "
+                        "provide a uint8 image with values in the range [0, 255]."
+                    )
+            image_array = (image_array * 255).astype(np.uint8)
+        return PIL.Image.fromarray(image_array, mode='RGB')
+    
+    # Handle RGBA images (4 channels)
+    if image_array.shape[-1] == 4:
+        if image_array.dtype != np.uint8:
+            if range_check:
+                max_ = image_array.max().item()
+                min_ = image_array.min().item()
+                if max_ > 1.0 or min_ < 0.0:
+                    raise ValueError(
+                        "The image data type is float, which requires values in the range [0.0, 1.0]. "
+                        f"However, the provided range is [{min_}, {max_}]. Please adjust the range or "
+                        "provide a uint8 image with values in the range [0, 255]."
+                    )
+            image_array = (image_array * 255).astype(np.uint8)
+        return PIL.Image.fromarray(image_array, mode='RGBA')
+    
+    raise NotImplementedError(
+        f"The image has {image_array.shape[-1]} channels, but 1, 3, or 4 channels are supported."
+    )
 
-    if image_array.dtype != np.uint8:
-        if range_check:
-            max_ = image_array.max().item()
-            min_ = image_array.min().item()
-            if max_ > 1.0 or min_ < 0.0:
-                raise ValueError(
-                    "The image data type is float, which requires values in the range [0.0, 1.0]. "
-                    f"However, the provided range is [{min_}, {max_}]. Please adjust the range or "
-                    "provide a uint8 image with values in the range [0, 255]."
-                )
 
-        image_array = (image_array * 255).astype(np.uint8)
-
-    return PIL.Image.fromarray(image_array)
-
-
-def write_image(image: np.ndarray | PIL.Image.Image, fpath: Path):
+def write_image(image: np.ndarray | PIL.Image.Image, fpath: Path, is_depth: bool = False):
+    """Write image to file.
+    
+    Args:
+        image: Image array or PIL Image
+        fpath: Output file path
+        is_depth: If True, save as 16-bit PNG without compression (for depth images)
+    """
     try:
         if isinstance(image, np.ndarray):
-            img = image_array_to_pil_image(image)
+            img = image_array_to_pil_image(image, is_depth=is_depth)
         elif isinstance(image, PIL.Image.Image):
             img = image
         else:
@@ -87,8 +181,13 @@ def worker_thread_loop(queue: queue.Queue):
         if item is None:
             queue.task_done()
             break
-        image_array, fpath = item
-        write_image(image_array, fpath)
+        # Item can be (image_array, fpath) or (image_array, fpath, is_depth)
+        if len(item) == 2:
+            image_array, fpath = item
+            is_depth = False
+        else:
+            image_array, fpath, is_depth = item
+        write_image(image_array, fpath, is_depth=is_depth)
         queue.task_done()
 
 
@@ -146,11 +245,18 @@ class AsyncImageWriter:
                 p.start()
                 self.processes.append(p)
 
-    def save_image(self, image: torch.Tensor | np.ndarray | PIL.Image.Image, fpath: Path):
+    def save_image(self, image: torch.Tensor | np.ndarray | PIL.Image.Image, fpath: Path, is_depth: bool = False):
+        """Save image asynchronously.
+        
+        Args:
+            image: Image tensor, array, or PIL Image
+            fpath: Output file path
+            is_depth: If True, save as 16-bit PNG without compression (for depth images)
+        """
         if isinstance(image, torch.Tensor):
             # Convert tensor to numpy array to minimize main process time
             image = image.cpu().numpy()
-        self.queue.put((image, fpath))
+        self.queue.put((image, fpath, is_depth))
 
     def wait_until_done(self):
         self.queue.join()

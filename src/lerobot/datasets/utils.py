@@ -132,11 +132,55 @@ def serialize_dict(stats: dict[str, torch.Tensor | np.ndarray | dict]) -> dict:
     return unflatten_dict(serialized_dict)
 
 
-def embed_images(dataset: datasets.Dataset) -> datasets.Dataset:
-    # Embed image bytes into the table before saving to parquet
+def embed_images(dataset: datasets.Dataset, skip_keys: set[str] | None = None) -> datasets.Dataset:
+    """Embed image bytes into the table before saving to parquet.
+    
+    Args:
+        dataset: Dataset to embed images for
+        skip_keys: Set of keys to skip embedding (e.g., depth images that should only store paths)
+    """
+    if skip_keys is None:
+        skip_keys = set()
+    
     format = dataset.format
-    dataset = dataset.with_format("arrow")
-    dataset = dataset.map(embed_table_storage, batched=False)
+    
+    if skip_keys:
+        # For depth images (in skip_keys), keep them as path strings
+        # Convert to python format to work with dictionaries
+        dataset = dataset.with_format("python")
+        
+        def selective_embed(example):
+            # example is a dict in python format
+            # Separate skipped and non-skipped keys
+            skipped_data = {k: example[k] for k in skip_keys if k in example}
+            non_skipped_data = {k: example[k] for k in example if k not in skip_keys}
+            
+            # Embed only non-skipped images
+            if non_skipped_data:
+                # Create a temporary single-row dataset with only non-skipped data
+                temp_dict = {k: [v] for k, v in non_skipped_data.items()}
+                temp_dataset = datasets.Dataset.from_dict(temp_dict)
+                temp_dataset = temp_dataset.with_format("arrow")
+                # Apply embed_table_storage to get embedded version
+                temp_dataset = temp_dataset.map(embed_table_storage, batched=False)
+                # Get the embedded example (first and only row)
+                temp_dataset = temp_dataset.with_format("python")
+                embedded_example = temp_dataset[0]
+                # Merge back skipped keys (as paths) with embedded images
+                result = {**embedded_example, **skipped_data}
+            else:
+                result = skipped_data
+            
+            return result
+        
+        dataset = dataset.map(selective_embed, batched=False)
+        # Convert back to arrow format for parquet saving
+        dataset = dataset.with_format("arrow")
+    else:
+        # No keys to skip, embed all images as before
+        dataset = dataset.with_format("arrow")
+        dataset = dataset.map(embed_table_storage, batched=False)
+    
     dataset = dataset.with_format(**format)
     return dataset
 
@@ -243,14 +287,57 @@ def backward_compatible_episodes_stats(
 
 
 def load_image_as_numpy(
-    fpath: str | Path, dtype: np.dtype = np.float32, channel_first: bool = True
+    fpath: str | Path, dtype: np.dtype = np.float32, channel_first: bool = True, normalize_depth: bool = True
 ) -> np.ndarray:
-    img = PILImage.open(fpath).convert("RGB")
-    img_array = np.array(img, dtype=dtype)
-    if channel_first:  # (H, W, C) -> (C, H, W)
-        img_array = np.transpose(img_array, (2, 0, 1))
-    if np.issubdtype(dtype, np.floating):
-        img_array /= 255.0
+    """Load image as numpy array.
+    
+    Args:
+        fpath: Image file path
+        dtype: Target data type
+        channel_first: If True, return (C, H, W), else (H, W, C) or (H, W) for grayscale
+        normalize_depth: If True, normalize 16-bit depth images to [0, 1]. If False, keep original values.
+    """
+    img = PILImage.open(fpath)
+    
+    # 检测深度图：16位灰度图（I;16）或单通道灰度图（L）
+    is_depth = img.mode in ['I;16', 'L', 'I']
+    
+    if is_depth:
+        # 深度图：保持单通道，不转换为RGB
+        if img.mode == 'I;16':
+            # 16位深度图：先读取为uint16，再根据dtype转换
+            img_array = np.array(img, dtype=np.uint16)
+            if np.issubdtype(dtype, np.floating):
+                # 对于浮点类型，先转为float32，再根据 normalize_depth 决定是否归一化
+                img_array = img_array.astype(np.float32)
+                if normalize_depth:
+                    img_array = img_array / 65535.0
+                # 如果不归一化，保持原始值（0-65535范围），但类型是float32
+                # 如果需要其他浮点类型，再转换
+                if dtype != np.float32:
+                    img_array = img_array.astype(dtype)
+            else:
+                img_array = img_array.astype(dtype)
+        else:
+            # 8位灰度图
+            img_array = np.array(img, dtype=dtype)
+            if np.issubdtype(dtype, np.floating):
+                img_array /= 255.0
+        
+        # 单通道图像：添加通道维度 (H, W) -> (1, H, W) 或 (H, W, 1)
+        if channel_first:
+            img_array = np.expand_dims(img_array, axis=0)  # (H, W) -> (1, H, W)
+        else:
+            img_array = np.expand_dims(img_array, axis=-1)  # (H, W) -> (H, W, 1)
+    else:
+        # RGB图像：转换为RGB并转置
+        img = img.convert("RGB")
+        img_array = np.array(img, dtype=dtype)
+        if channel_first:  # (H, W, C) -> (C, H, W)
+            img_array = np.transpose(img_array, (2, 0, 1))
+        if np.issubdtype(dtype, np.floating):
+            img_array /= 255.0
+    
     return img_array
 
 
@@ -363,9 +450,12 @@ def get_hf_features_from_features(features: dict) -> datasets.Features:
     hf_features = {}
     for key, ft in features.items():
         if ft["dtype"] == "video":
+            # Video keys are not stored in parquet, only as separate video files
             continue
         elif ft["dtype"] == "image":
-            hf_features[key] = datasets.Image()
+            # Image keys: not stored in parquet, paths are generated dynamically from key, episode_index, and frame_index
+            # This keeps parquet files small and consistent with video handling
+            continue
         elif ft["shape"] == (1,):
             hf_features[key] = datasets.Value(dtype=ft["dtype"])
         elif len(ft["shape"]) == 1:

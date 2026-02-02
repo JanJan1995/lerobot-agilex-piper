@@ -684,8 +684,61 @@ class LeRobotDataset(torch.utils.data.Dataset):
         return {
             key: torch.stack(self.hf_dataset.select(q_idx)[key])
             for key, q_idx in query_indices.items()
-            if key not in self.meta.video_keys
+            if key not in self.meta.video_keys and key not in self.meta.image_keys
         }
+
+    def _query_images(self, image_paths: dict[str, str]) -> dict[str, torch.Tensor]:
+        """Load images from file paths.
+        
+        Args:
+            image_paths: Dictionary mapping image keys to their file paths
+            
+        Returns:
+            Dictionary with loaded images as torch tensors
+        """
+        import PIL.Image
+        item = {}
+        for img_key, img_path_str in image_paths.items():
+            # Handle both string paths and Path objects
+            if isinstance(img_path_str, str):
+                # If it's already an absolute path, use it directly
+                if os.path.isabs(img_path_str):
+                    img_path = Path(img_path_str)
+                else:
+                    # Relative path, join with root
+                    img_path = self.root / img_path_str
+            else:
+                img_path = img_path_str
+            
+            if img_path.exists():
+                # Load image and convert to tensor
+                img = PIL.Image.open(img_path)
+                # Handle different image modes
+                if img.mode == 'I;16':
+                    # 16-bit depth image: preserve original uint16 values
+                    img_array = np.array(img, dtype=np.uint16)
+                    img_tensor = torch.from_numpy(img_array)
+                elif img.mode == 'L':
+                    # 8-bit grayscale image
+                    img_array = np.array(img, dtype=np.uint8)
+                    img_tensor = torch.from_numpy(img_array)
+                elif img.mode in ['RGB', 'RGBA']:
+                    # Color images: convert to CHW format
+                    if img.mode == 'RGBA':
+                        img = img.convert('RGB')
+                    img_array = np.array(img)
+                    img_tensor = torch.from_numpy(img_array).permute(2, 0, 1)  # HWC -> CHW
+                else:
+                    # Convert other modes to RGB
+                    img = img.convert('RGB')
+                    img_array = np.array(img)
+                    img_tensor = torch.from_numpy(img_array).permute(2, 0, 1)  # HWC -> CHW
+                
+                item[img_key] = img_tensor
+            else:
+                raise FileNotFoundError(f"Image file not found: {img_path}")
+        
+        return item
 
     def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int) -> dict[str, torch.Tensor]:
         """Note: When using data workers (e.g. DataLoader with num_workers>0), do not call this function
@@ -720,6 +773,52 @@ class LeRobotDataset(torch.utils.data.Dataset):
             item = {**item, **padding}
             for key, val in query_result.items():
                 item[key] = val
+
+        # Load images directly from disk using key, episode_index, and frame_index
+        # Backward compatibility: also handle old datasets where images were embedded or paths were stored
+        if len(self.meta.image_keys) > 0:
+            frame_index = item["frame_index"].item() if "frame_index" in item else idx
+            for key in self.meta.image_keys:
+                if key in item:
+                    value = item[key]
+                    # Check if image is already loaded (embedded format - old datasets)
+                    if isinstance(value, torch.Tensor):
+                        # Old format: image is already embedded and loaded as tensor
+                        # No need to load from file, already in the correct format
+                        continue
+                    elif isinstance(value, np.ndarray) and value.ndim >= 2:
+                        # Old format: image is embedded as numpy array
+                        # Convert to torch tensor
+                        if value.ndim == 3 and value.shape[2] == 3:
+                            # RGB image: HWC -> CHW
+                            item[key] = torch.from_numpy(value).permute(2, 0, 1)
+                        elif value.ndim == 2:
+                            # Grayscale/depth image: HW
+                            item[key] = torch.from_numpy(value)
+                        else:
+                            item[key] = torch.from_numpy(value)
+                        continue
+                    elif isinstance(value, (str, Path)) or (hasattr(value, 'item') and isinstance(value.item(), str)):
+                        # Old format: image path was stored in parquet (backward compatibility)
+                        # Convert to string path and load
+                        if isinstance(value, (str, Path)):
+                            path_str = str(value)
+                        else:
+                            path_str = str(value.item())
+                        loaded_images = self._query_images({key: path_str})
+                        item[key] = loaded_images[key]
+                        continue
+                
+                # New format: load image directly from disk using key, episode_index, and frame_index
+                try:
+                    item[key] = self._load_image_by_index(key, ep_idx, frame_index)
+                except FileNotFoundError as e:
+                    # If image file doesn't exist, raise a more informative error
+                    raise FileNotFoundError(
+                        f"Image file not found for key '{key}' at episode {ep_idx}, frame {frame_index}. "
+                        f"Expected path: {self._get_image_file_path(ep_idx, key, frame_index)}. "
+                        f"Make sure the image was saved during dataset creation."
+                    ) from e
 
         if len(self.meta.video_keys) > 0:
             current_ts = item["timestamp"].item()
@@ -764,14 +863,63 @@ class LeRobotDataset(torch.utils.data.Dataset):
             image_key=image_key, episode_index=episode_index, frame_index=frame_index
         )
         return self.root / fpath
+    
+    def _load_image_by_index(self, image_key: str, episode_index: int, frame_index: int) -> torch.Tensor:
+        """Load image directly from disk using key, episode_index, and frame_index.
+        
+        Args:
+            image_key: Image key name
+            episode_index: Episode index
+            frame_index: Frame index within the episode
+            
+        Returns:
+            Loaded image as torch tensor
+        """
+        import PIL.Image
+        img_path = self._get_image_file_path(episode_index, image_key, frame_index)
+        
+        if not img_path.exists():
+            raise FileNotFoundError(f"Image file not found: {img_path}")
+        
+        # Load image and convert to tensor
+        img = PIL.Image.open(img_path)
+        # Handle different image modes
+        if img.mode == 'I;16':
+            # 16-bit depth image: preserve original uint16 values
+            img_array = np.array(img, dtype=np.uint16)
+            img_tensor = torch.from_numpy(img_array)
+        elif img.mode == 'L':
+            # 8-bit grayscale image
+            img_array = np.array(img, dtype=np.uint8)
+            img_tensor = torch.from_numpy(img_array)
+        elif img.mode in ['RGB', 'RGBA']:
+            # Color images: convert to CHW format
+            if img.mode == 'RGBA':
+                img = img.convert('RGB')
+            img_array = np.array(img)
+            img_tensor = torch.from_numpy(img_array).permute(2, 0, 1)  # HWC -> CHW
+        else:
+            # Convert other modes to RGB
+            img = img.convert('RGB')
+            img_array = np.array(img)
+            img_tensor = torch.from_numpy(img_array).permute(2, 0, 1)  # HWC -> CHW
+        
+        return img_tensor
 
-    def _save_image(self, image: torch.Tensor | np.ndarray | PIL.Image.Image, fpath: Path) -> None:
+    def _save_image(self, image: torch.Tensor | np.ndarray | PIL.Image.Image, fpath: Path, is_depth: bool = False) -> None:
+        """Save image to file.
+        
+        Args:
+            image: Image tensor, array, or PIL Image
+            fpath: Output file path
+            is_depth: If True, save as 16-bit PNG without compression (for depth images)
+        """
         if self.image_writer is None:
             if isinstance(image, torch.Tensor):
                 image = image.cpu().numpy()
-            write_image(image, fpath)
+            write_image(image, fpath, is_depth=is_depth)
         else:
-            self.image_writer.save_image(image=image, fpath=fpath)
+            self.image_writer.save_image(image=image, fpath=fpath, is_depth=is_depth)
 
     def add_frame(self, frame: dict, task: str, timestamp: float | None = None) -> None:
         """
@@ -805,21 +953,109 @@ class LeRobotDataset(torch.utils.data.Dataset):
                     f"An element of the frame is not in the features. '{key}' not in '{self.features.keys()}'."
                 )
 
-            if self.features[key]["dtype"] in ["image", "video"]:
-            #     img_path = self._get_image_file_path(
-            #         episode_index=self.episode_buffer["episode_index"], image_key=key, frame_index=frame_index
-            #     )
-            #     if frame_index == 0:
-            #         img_path.parent.mkdir(parents=True, exist_ok=True)
-                    
-            #     img_path = Path(str(img_path)[:-4] + ".jpg")
-            #     self._save_image(frame[key], img_path)
-            #     # print("str(img_path):", str(img_path))
-            #     self.episode_buffer[key].append(str(img_path))
-                self.episode_buffer[key].append(str(frame[key]))
-                self.image_path[key] = os.path.dirname(str(frame[key]))
+            value = frame[key]
+            dtype = self.features[key]["dtype"]
+
+            # ---------- IMAGE ----------
+            if dtype == "image":
+                # 情况 1：直接传入 numpy / tensor / PIL 图像 → 保存到本地，再写入路径
+                if isinstance(value, (torch.Tensor, np.ndarray, PIL.Image.Image)):
+                    img_path = self._get_image_file_path(
+                        episode_index=self.episode_buffer["episode_index"],
+                        image_key=key,
+                        frame_index=frame_index,
+                    )
+                    if frame_index == 0:
+                        img_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    # 根据 shape 判断是否为深度图（2D）
+                    img_array = value
+                    if isinstance(img_array, torch.Tensor):
+                        is_depth = img_array.ndim == 2
+                    elif isinstance(img_array, np.ndarray):
+                        is_depth = img_array.ndim == 2
+                    else:
+                        is_depth = False
+
+                    self._save_image(value, img_path, is_depth=is_depth)
+                    # Don't store image path in episode_buffer - it will be generated dynamically from key, episode_index, frame_index
+                    self.image_path[key] = os.path.dirname(str(img_path))
+
+                # 情况 2：传入的是图像路径字符串 / Path → 复制到数据集 images 目录（不读入内存）
+                elif isinstance(value, (str, Path)):
+                    src_path = Path(value)
+                    if not src_path.is_absolute():
+                        src_path = self.root / src_path
+
+                    # 目标路径：使用内部统一命名规则
+                    dst_path = self._get_image_file_path(
+                        episode_index=self.episode_buffer["episode_index"],
+                        image_key=key,
+                        frame_index=frame_index,
+                    )
+                    if frame_index == 0:
+                        dst_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    # 直接文件复制，不解码到内存
+                    shutil.copy2(src_path, dst_path)
+
+                    # Don't store image path in episode_buffer - it will be generated dynamically from key, episode_index, frame_index
+                    self.image_path[key] = os.path.dirname(str(dst_path))
+
+                else:
+                    raise TypeError(
+                        f"Unsupported image type for key '{key}': {type(value)}. "
+                        "Expected numpy array, torch.Tensor, PIL.Image.Image, or path string."
+                    )
+
+            # ---------- VIDEO ----------
+            elif dtype == "video":
+                # 情况 1：传入的是路径（目录或文件）→ 直接保存路径，后续用 ffmpeg 编码
+                if isinstance(value, (str, Path)):
+                    v_path = Path(value)
+                    if not v_path.is_absolute():
+                        v_path = self.root / v_path
+                    self.episode_buffer[key].append(str(v_path))
+                    # 对于 ffmpeg，我们只关心“帧图像所在目录”
+                    # 如果传入的是目录 → 直接使用该目录
+                    # 如果传入的是单个文件路径 → 使用其所在目录
+                    if v_path.is_dir():
+                        self.image_path[key] = str(v_path)
+                    else:
+                        self.image_path[key] = os.path.dirname(str(v_path))
+
+                # 情况 2：直接传入单帧图像（numpy / tensor / PIL）→ 保存为帧图像，后续批量编码成 mp4
+                elif isinstance(value, (torch.Tensor, np.ndarray, PIL.Image.Image)):
+                    img_path = self._get_image_file_path(
+                        episode_index=self.episode_buffer["episode_index"],
+                        image_key=key,
+                        frame_index=frame_index,
+                    )
+                    if frame_index == 0:
+                        img_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    # 对于 video，我们按普通 RGB 图像保存（不当作 depth）。
+                    # 但很多视频帧是通过 OpenCV 读取的，格式为 BGR(H, W, 3)，需要先转成 RGB。
+                    if isinstance(value, np.ndarray) and value.ndim == 3 and value.shape[-1] == 3:
+                        # 假定来自 OpenCV 的 BGR，转换为 RGB
+                        rgb_value = value[..., ::-1]
+                    else:
+                        rgb_value = value
+
+                    self._save_image(rgb_value, img_path, is_depth=False)
+                    # 这里保存的是当前帧的文件路径；ffmpeg 使用所在目录批量编码
+                    self.episode_buffer[key].append(str(img_path))
+                    self.image_path[key] = os.path.dirname(str(img_path))
+
+                else:
+                    raise TypeError(
+                        f"Unsupported video type for key '{key}': {type(value)}. "
+                        "Expected numpy array, torch.Tensor, PIL.Image.Image, or path string."
+                    )
+
+            # ---------- 其它标量 / 向量特征 ----------
             else:
-                self.episode_buffer[key].append(frame[key])
+                self.episode_buffer[key].append(value)
 
         self.episode_buffer["size"] += 1
 
@@ -867,6 +1103,16 @@ class LeRobotDataset(torch.utils.data.Dataset):
             if key in ["index", "episode_index", "task_index"] or ft["dtype"] in ["image", "video"]:
                 continue
             episode_buffer[key] = np.stack(episode_buffer[key])
+
+        # Generate image paths for statistics computation (images are not stored in episode_buffer)
+        for key in self.meta.image_keys:
+            if key in self.features:
+                # Generate paths for all frames in this episode
+                image_paths = []
+                for frame_idx in range(episode_length):
+                    img_path = self._get_image_file_path(episode_index, key, frame_idx)
+                    image_paths.append(str(img_path))
+                episode_buffer[key] = image_paths
 
         self._wait_image_writer()
         self._save_episode_table(episode_buffer, episode_index)
@@ -918,7 +1164,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
     def _save_episode_table(self, episode_buffer: dict, episode_index: int) -> None:
         episode_dict = {key: episode_buffer[key] for key in self.hf_features}
         ep_dataset = datasets.Dataset.from_dict(episode_dict, features=self.hf_features, split="train")
-        ep_dataset = embed_images(ep_dataset)
+        
+        # Images are now stored as string paths (like videos), not embedded bytes
+        # This keeps parquet files small and consistent with video handling
+        # No need to call embed_images anymore for regular images
         self.hf_dataset = concatenate_datasets([self.hf_dataset, ep_dataset])
         self.hf_dataset.set_transform(hf_transform_to_torch)
         ep_data_path = self.root / self.meta.get_data_file_path(ep_index=episode_index)
@@ -1038,12 +1287,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
             if img.shape[:2] != (h, w):
                 img = cv2.resize(img, (w, h))
             writer.write(img)
-            if idx % 50 == 0:
-                print(f'已写入 {idx}/{len(img_path_list)} 帧')
 
     def list_imgs(self, img_dir, ext=('jpg', 'jpeg', 'png', 'bmp', 'tiff')):
         """返回目录下所有图片文件的绝对路径（升序）"""
-        print("img_dir:", img_dir)
         pattern = os.path.join(img_dir, '*')
         files = []
         for e in ext:
@@ -1059,15 +1305,79 @@ class LeRobotDataset(torch.utils.data.Dataset):
         img_dir = self._get_image_file_path(
             episode_index=episode_index, image_key=key, frame_index=0
         ).parent
-        # encode_video_frames(img_dir, video_path, self.fps, overwrite=True)
+
+        # 根据 episode_buffer[key] 的内容判断：
+        # 1）如果保存的是“每一帧的图像路径列表”（文件），尝试直接从这些路径推导帧目录；
+        #    若全部在同一目录下，则直接对该目录做 ffmpeg glob；
+        #    若不在同一目录下，则复制/链接到临时目录，再对临时目录做 glob。
+        # 2）否则，退回到原有的目录 + ffmpeg glob 方式。
+        frame_paths = self.episode_buffer.get(key, None)
+
+        frames_dir: str
+
+        # 情况 1：每一帧都传入的是单张图像路径（文件路径列表）
+        if (
+            isinstance(frame_paths, list)
+            and len(frame_paths) > 0
+            and all(Path(p).suffix.lower() in [".png", ".jpg", ".jpeg", ".bmp", ".tiff"] for p in frame_paths)
+        ):
+            # 取所有帧的所在目录
+            dirs = {os.path.dirname(os.path.abspath(p)) for p in frame_paths}
+            if len(dirs) == 1:
+                # 全部帧都在同一个目录 → 直接对该目录做 glob，不需 txt
+                frames_dir = next(iter(dirs))
+            else:
+                # 帧分布在多个目录 → 复制到一个临时目录，再对该目录做 glob（仍然只用 ffmpeg）
+                temp_dir = img_dir / f"tmp_ffmpeg_{key}_ep{episode_index:06d}"
+                os.makedirs(temp_dir, exist_ok=True)
+                for idx, p in enumerate(frame_paths):
+                    src = Path(p)
+                    # 标准化命名，保证顺序
+                    dst = temp_dir / f"frame_{idx:06d}{src.suffix.lower()}"
+                    if not dst.exists():
+                        shutil.copy2(src, dst)
+                frames_dir = str(temp_dir)
+        else:
+            # 情况 2：使用帧目录 + ffmpeg glob（兼容旧流程或仅传入目录的情况）
+            # 如果使用内部保存的帧图像，则目录为 img_dir；
+            # 如果用户直接传入外部帧目录，则目录为 self.image_path[key]
+            frames_dir = self.image_path.get(key, str(img_dir))
+
+        # 统一使用 ffmpeg + glob，从 frames_dir 读取所有帧编码为 mp4
         os.makedirs(os.path.dirname(video_path), exist_ok=True)
-              #  -c:v h264_nvenc -preset p7 -cq 23 \
-        os.system(f"ffmpeg -y -framerate {self.fps} \
-                -pattern_type glob -i '{self.image_path[key]}/*.jpg' \
-                -c:v h264 -cq 23 \
-                -pix_fmt yuv420p {str(video_path)} -loglevel quiet")
-        # self.gpu_imgs2video(self.list_imgs(img_dir), str(video_path), fps=self.fps)
-        # shutil.rmtree(img_dir)
+
+        # 根据目录下实际存在的扩展名，自动选择 jpg / png / 其它常见格式
+        candidate_patterns = ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tiff"]
+        chosen_pattern = None
+        for pat in candidate_patterns:
+            if glob.glob(os.path.join(frames_dir, pat)):
+                chosen_pattern = pat
+                break
+
+        # 如果没有匹配到上述常见格式，就退回到通配所有文件
+        if chosen_pattern is None:
+            chosen_pattern = "*"
+
+        cmd = (
+            f"ffmpeg -y -framerate {self.fps} "
+            f"-pattern_type glob -i '{frames_dir}/{chosen_pattern}' "
+            f"-c:v h264 -cq 23 "
+            f"-pix_fmt yuv420p {str(video_path)} -loglevel quiet"
+        )
+        os.system(cmd)
+
+        # 如果是由 numpy/tensor/PIL 直接写入到内部 images 目录的临时帧，
+        # 在成功生成 mp4 之后可以清理掉，以节省磁盘空间。
+        # 规则：只删除位于当前 episode 对应 img_dir 下的帧目录，避免误删用户原始数据。
+        try:
+            frames_dir_path = Path(frames_dir).resolve()
+            internal_img_dir = img_dir.resolve()
+            # 检查 frames_dir 是否在 internal_img_dir 之下（包含 temp_dir 等）
+            if str(frames_dir_path).startswith(str(internal_img_dir)):
+                shutil.rmtree(frames_dir_path, ignore_errors=True)
+        except Exception:
+            # 清理失败不应中断流程
+            pass
 
     def encode_episode_videos(self, episode_index: int) -> None:
         """

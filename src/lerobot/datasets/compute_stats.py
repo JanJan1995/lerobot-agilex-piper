@@ -58,14 +58,32 @@ def sample_images(image_paths: list[str]) -> np.ndarray:
     sampled_indices = sample_indices(len(image_paths))
 
     images = None
+    image_dtype = None
     for i, idx in enumerate(sampled_indices):
         path = image_paths[idx]
-        # we load as uint8 to reduce memory usage
-        img = load_image_as_numpy(path, dtype=np.uint8, channel_first=True)
+        
+        # 检测是否是16位深度图
+        import PIL.Image
+        with PIL.Image.open(path) as test_img:
+            is_16bit_depth = test_img.mode == 'I;16'
+        
+        # 对于16位深度图：先读取为uint16，然后归一化到[0,1]进行统计；其他图像使用uint8节省内存
+        if is_16bit_depth:
+            # 16位深度图：读取为uint16，然后归一化为float32（范围[0,1]）
+            # normalize_depth=True 会将 uint16 值除以 65535.0 归一化
+            img = load_image_as_numpy(path, dtype=np.float32, channel_first=True, normalize_depth=True)
+            if image_dtype is None:
+                image_dtype = np.float32
+        else:
+            # RGB或8位灰度图：使用uint8节省内存
+            img = load_image_as_numpy(path, dtype=np.uint8, channel_first=True)
+            if image_dtype is None:
+                image_dtype = np.uint8
+        
         img = auto_downsample_height_width(img)
 
         if images is None:
-            images = np.empty((len(sampled_indices), *img.shape), dtype=np.uint8)
+            images = np.empty((len(sampled_indices), *img.shape), dtype=image_dtype)
 
         images[i] = img
 
@@ -88,9 +106,25 @@ def compute_episode_stats(episode_data: dict[str, list[str] | np.ndarray], featu
         if features[key]["dtype"] == "string":
             continue  # HACK: we should receive np.arrays of strings
         elif features[key]["dtype"] in ["image", "video"]:
+            if not data or len(data) == 0:
+                # Skip if no image paths available
+                continue
             ep_ft_array = sample_images(data)  # data is a list of image paths
-            axes_to_reduce = (0, 2, 3)  # keep channel dim
-            keepdims = True
+            if ep_ft_array is None:
+                # Skip if sample_images returned None (e.g., no valid images found)
+                continue
+            
+            # 检测是否是深度图（单通道）：shape应该是 (N, 1, H, W) 而不是 (N, 3, H, W)
+            is_depth = ep_ft_array.shape[1] == 1  # channel dimension is 1
+            
+            if is_depth:
+                # 深度图：在 (0, 2, 3) 维度上统计，保留通道维度，结果是 (1, 1, 1)
+                axes_to_reduce = (0, 2, 3)
+                keepdims = True
+            else:
+                # RGB图像：在 (0, 2, 3) 维度上统计，保留通道维度，结果是 (3, 1, 1)
+                axes_to_reduce = (0, 2, 3)
+                keepdims = True
         else:
             ep_ft_array = data  # data is already a np.ndarray
             axes_to_reduce = 0  # compute stats over the first axis
@@ -100,9 +134,27 @@ def compute_episode_stats(episode_data: dict[str, list[str] | np.ndarray], featu
 
         # finally, we normalize and remove batch dim for images
         if features[key]["dtype"] in ["image", "video"]:
-            ep_stats[key] = {
-                k: v if k == "count" else np.squeeze(v / 255.0, axis=0) for k, v in ep_stats[key].items()
-            }
+            # 检测是否是深度图
+            is_depth = ep_ft_array.shape[1] == 1 if len(ep_ft_array.shape) > 1 else False
+            
+            if is_depth:
+                # 深度图：已经在load_image_as_numpy中归一化（16位深度图）或需要归一化（8位深度图）
+                # 检查数据类型：如果是float32说明已经归一化，如果是uint8需要归一化
+                if ep_ft_array.dtype == np.float32:
+                    # 16位深度图：已经在加载时归一化到[0,1]，直接移除batch维度
+                    ep_stats[key] = {
+                        k: v if k == "count" else np.squeeze(v, axis=0) for k, v in ep_stats[key].items()
+                    }
+                else:
+                    # 8位深度图：除以255归一化
+                    ep_stats[key] = {
+                        k: v if k == "count" else np.squeeze(v / 255.0, axis=0) for k, v in ep_stats[key].items()
+                    }
+            else:
+                # RGB图像：除以255并移除batch维度
+                ep_stats[key] = {
+                    k: v if k == "count" else np.squeeze(v / 255.0, axis=0) for k, v in ep_stats[key].items()
+                }
 
     return ep_stats
 
