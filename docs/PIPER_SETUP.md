@@ -415,6 +415,20 @@ pip install piper_sdk
 - 对于 RealSense，检查序列号是否正确
 - 对于 OpenCV 摄像头，检查 `camera_index`（可用 `v4l2-ctl --list-devices` 查看）
 
+### Q9: 录制视频时颜色通道反转（红色变蓝色）
+
+**现象**：`dataset.video=false` 时 PNG 帧颜色正常，但 `dataset.video=true` 时 MP4 视频中红色变成蓝色。
+
+**根因**：`src/lerobot/datasets/lerobot_dataset.py` 的 `add_frame()` 中，当 feature dtype 为 `"video"` 时，代码错误地假设所有 numpy array 都是 BGR 格式，强行做了 `value[..., ::-1]` 反转。但 `OpenCVCamera` 已经根据 `color_mode` 配置完成颜色转换（配置 `rgb` 时返回的就是 RGB），导致 RGB 被错误转成了 BGR。
+
+**修复**：删除 `lerobot_dataset.py` 中 `dtype == "video"` 分支下的 BGR→RGB 转换逻辑，直接保存 `value`：
+
+```python
+self._save_image(value, img_path, is_depth=False)
+```
+
+相机层已经负责颜色模式转换，数据集层不应再做假设性转换。
+
 ---
 
 ## 十、扩展：双臂 Piper（未来）

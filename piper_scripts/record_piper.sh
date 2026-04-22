@@ -48,8 +48,8 @@ lerobot-record \
     --robot.can_name=can0 \
     --robot.id=piper_slave \
     --robot.cameras='{
-        wrist: {type: opencv, index_or_path: "/dev/video4", width: 640, height: 480, fps: 30},
-        up:    {type: opencv, index_or_path: "/dev/video10", width: 640, height: 480, fps: 30}
+        wrist: {type: opencv, index_or_path: "/dev/video4", width: 640, height: 480, fps: 30, color_mode: rgb},
+        up:    {type: opencv, index_or_path: "/dev/video10", width: 640, height: 480, fps: 30, color_mode: rgb}
     }' \
     --teleop.type=piper_leader \
     --teleop.can_name=can0 \

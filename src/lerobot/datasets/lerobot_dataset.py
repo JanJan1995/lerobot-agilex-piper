@@ -1035,14 +1035,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
                         img_path.parent.mkdir(parents=True, exist_ok=True)
 
                     # 对于 video，我们按普通 RGB 图像保存（不当作 depth）。
-                    # 但很多视频帧是通过 OpenCV 读取的，格式为 BGR(H, W, 3)，需要先转成 RGB。
-                    if isinstance(value, np.ndarray) and value.ndim == 3 and value.shape[-1] == 3:
-                        # 假定来自 OpenCV 的 BGR，转换为 RGB
-                        rgb_value = value[..., ::-1]
-                    else:
-                        rgb_value = value
-
-                    self._save_image(rgb_value, img_path, is_depth=False)
+                    # 注意：传入的 numpy array 已经由相机层（如 OpenCVCamera）根据 color_mode 配置处理过颜色通道，
+                    # 此处不应再做 BGR->RGB 的假设性转换，否则会导致颜色通道被错误反转。
+                    self._save_image(value, img_path, is_depth=False)
                     # 这里保存的是当前帧的文件路径；ffmpeg 使用所在目录批量编码
                     self.episode_buffer[key].append(str(img_path))
                     self.image_path[key] = os.path.dirname(str(img_path))
