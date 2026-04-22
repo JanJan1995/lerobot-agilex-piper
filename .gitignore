@@ -1,0 +1,10 @@
+*.pyc
+__pycache__/
+*.pyc
+
+# Runtime outputs
+outputs/
+
+# Agent context files
+AGENTS.md
+**/AGENTS.md

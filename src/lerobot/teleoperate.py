@@ -68,6 +68,7 @@ from lerobot.robots import (  # noqa: F401
     hope_jr,
     koch_follower,
     make_robot_from_config,
+    piper_follower,
     so100_follower,
     so101_follower,
 )
@@ -79,6 +80,7 @@ from lerobot.teleoperators import (  # noqa: F401
     homunculus,
     koch_leader,
     make_teleoperator_from_config,
+    piper_leader,
     so100_leader,
     so101_leader,
 )
@@ -104,29 +106,53 @@ def teleop_loop(
 ):
     display_len = max(len(key) for key in robot.action_features)
     start = time.perf_counter()
-    while True:
-        loop_start = time.perf_counter()
-        action = teleop.get_action()
-        if display_data:
-            observation = robot.get_observation()
-            log_rerun_data(observation, action)
 
-        robot.send_action(action)
-        dt_s = time.perf_counter() - loop_start
-        busy_wait(1 / fps - dt_s)
+    # Setup single-character input for graceful 'q' quit (Linux/macOS only)
+    old_tty_settings = None
+    if __import__("sys").platform != "win32" and __import__("sys").stdin.isatty():
+        import termios
+        import tty
+        old_tty_settings = termios.tcgetattr(__import__("sys").stdin)
+        tty.setcbreak(__import__("sys").stdin.fileno())
+        logging.info("Press 'q' to quit teleoperation gracefully.")
 
-        loop_s = time.perf_counter() - loop_start
+    try:
+        while True:
+            # Non-blocking check for 'q' key press
+            if old_tty_settings is not None:
+                import select
+                if select.select([__import__("sys").stdin], [], [], 0)[0]:
+                    key = __import__("sys").stdin.read(1)
+                    if key == "q":
+                        logging.info("Exit key 'q' pressed, stopping teleoperation...")
+                        return
 
-        print("\n" + "-" * (display_len + 10))
-        print(f"{'NAME':<{display_len}} | {'NORM':>7}")
-        for motor, value in action.items():
-            print(f"{motor:<{display_len}} | {value:>7.2f}")
-        print(f"\ntime: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz)")
+            loop_start = time.perf_counter()
+            action = teleop.get_action()
+            if display_data:
+                observation = robot.get_observation()
+                log_rerun_data(observation, action)
 
-        if duration is not None and time.perf_counter() - start >= duration:
-            return
+            robot.send_action(action)
+            dt_s = time.perf_counter() - loop_start
+            busy_wait(1 / fps - dt_s)
 
-        move_cursor_up(len(action) + 5)
+            loop_s = time.perf_counter() - loop_start
+
+            print("\n" + "-" * (display_len + 10))
+            print(f"{'NAME':<{display_len}} | {'NORM':>7}")
+            for motor, value in action.items():
+                print(f"{motor:<{display_len}} | {value:>7.2f}")
+            print(f"\ntime: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz)")
+
+            if duration is not None and time.perf_counter() - start >= duration:
+                return
+
+            move_cursor_up(len(action) + 5)
+    finally:
+        if old_tty_settings is not None:
+            import termios
+            termios.tcsetattr(__import__("sys").stdin, termios.TCSADRAIN, old_tty_settings)
 
 
 @draccus.wrap()
@@ -146,7 +172,7 @@ def teleoperate(cfg: TeleoperateConfig):
         teleop_loop(teleop, robot, cfg.fps, display_data=cfg.display_data, duration=cfg.teleop_time_s)
     except KeyboardInterrupt:
         pass
-    finally:
+    finally:  
         if cfg.display_data:
             rr.rerun_shutdown()
         teleop.disconnect()

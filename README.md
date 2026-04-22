@@ -46,6 +46,11 @@ Then, install the library in editable mode. This is useful if you plan to contri
 ```bash
 pip install -e .
 ```
+
+## Piper Setup
+
+本项目支持使用 **Agilex Piper 机械臂** 进行主从遥操作并制作 LeRobot 数据集。详细配置与使用说明请参考 [docs/PIPER_SETUP.md](docs/PIPER_SETUP.md)。
+
 ## Train
 ```bash
 conda activate lerobot && cd ~/lerobot && python src/lerobot/scripts/train.py --dataset.repo_id=data --policy.type=act --output_dir=/home/agilex/checkpoint_lerobot --job_name=data --policy.device=cuda --wandb.enable=false --dataset.root=/home/agilex/data_lerobot/ --policy.repo_id=data --batch_size 1 --eval.batch_size 1

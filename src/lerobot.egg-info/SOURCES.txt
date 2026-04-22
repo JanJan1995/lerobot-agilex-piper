@@ -67,6 +67,7 @@ src/lerobot/motors/dynamixel/tables.py
 src/lerobot/motors/feetech/__init__.py
 src/lerobot/motors/feetech/feetech.py
 src/lerobot/motors/feetech/tables.py
+src/lerobot/motors/piper/piper_motors_bus.py
 src/lerobot/optim/__init__.py
 src/lerobot/optim/factory.py
 src/lerobot/optim/optimizers.py
@@ -127,6 +128,9 @@ src/lerobot/robots/lekiwi/config_lekiwi.py
 src/lerobot/robots/lekiwi/lekiwi.py
 src/lerobot/robots/lekiwi/lekiwi_client.py
 src/lerobot/robots/lekiwi/lekiwi_host.py
+src/lerobot/robots/piper_follower/__init__.py
+src/lerobot/robots/piper_follower/config_piper_follower.py
+src/lerobot/robots/piper_follower/piper_follower.py
 src/lerobot/robots/so100_follower/__init__.py
 src/lerobot/robots/so100_follower/config_so100_follower.py
 src/lerobot/robots/so100_follower/so100_follower.py
@@ -180,6 +184,9 @@ src/lerobot/teleoperators/keyboard/teleop_keyboard.py
 src/lerobot/teleoperators/koch_leader/__init__.py
 src/lerobot/teleoperators/koch_leader/config_koch_leader.py
 src/lerobot/teleoperators/koch_leader/koch_leader.py
+src/lerobot/teleoperators/piper_leader/__init__.py
+src/lerobot/teleoperators/piper_leader/config_piper_leader.py
+src/lerobot/teleoperators/piper_leader/piper_leader.py
 src/lerobot/teleoperators/so100_leader/__init__.py
 src/lerobot/teleoperators/so100_leader/config_so100_leader.py
 src/lerobot/teleoperators/so100_leader/so100_leader.py
